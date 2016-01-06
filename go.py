@@ -6,7 +6,7 @@ from sys import exit, stderr
 
 # Constants
 
-EC2_AMI = ''
+TAG_PREFIX = 'marty-mini-project-'
 
 # Helpers
 def warning(*objs):
@@ -25,31 +25,37 @@ except ImportError:
 try:
     import boto3
 except ImportError:
-    error('Python boto3 AWS SDK is not installed. Try `pip install boto3`')
+    error('Python boto3 AWS SDK is not installed. Try `pip install boto3` or `easy_install boto3` (preferrably in a virtual_env).')
     exit(1)
 
 # Parse Args
-global args
 parser = ArgumentParser(description="Marty's Cloudification Mini Project")
 parser.add_argument("command", type=str, choices=['create', 'destroy', 'run', 'stop', 'test'], help="Automated function to use.")
-args = parser.parse_args()
 
-# Functions
+global go_args
+go_args = parser.parse_args()
+
+# Command Functions
 def create():
-    pass
+    print('create')
 
 def destroy():
-    pass
+    print('destroy')
 
 def run():
-    pass
+    print('run')
 
 def stop():
-    pass
+    print('stop')
 
 def test():
-    pass
+    print('test')
+
+commands = { 'create': create, 'destroy': destroy, 'run': run, 'stop': stop, 'test': test }
 
 # Entry
-
+if go_args.command in commands:
+    commands[go_args.command]()
+else:
+    error("invalid command: '{0}' (choose from {1})".format(go_args.command, sorted(commands.keys())))
 
