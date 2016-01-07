@@ -23,7 +23,8 @@ except ImportError:
     exit(1)
 
 try:
-    import boto3
+    from boto3.session import Session
+    from botocore.exceptions import ClientError, NoCredentialsError
 except ImportError:
     error('Python boto3 AWS SDK is not installed. Try `pip install boto3` or `easy_install boto3` (preferrably in a virtual_env).')
     exit(1)
@@ -34,6 +35,17 @@ parser.add_argument("command", type=str, choices=['create', 'destroy', 'run', 's
 
 global go_args
 go_args = parser.parse_args()
+
+# Init AWS Session
+global session
+session = Session()
+
+# AWS Functions
+
+#def test_credentials():
+#    ec2 = session.resource('ec2')
+#    ec2.create_key_pair(DryRun=True, KeyName='blah')
+    
 
 # Command Functions
 def create():
@@ -54,6 +66,16 @@ def test():
 commands = { 'create': create, 'destroy': destroy, 'run': run, 'stop': stop, 'test': test }
 
 # Entry
+
+#try:
+#    test_credentials()
+#except NoCredentialsError:
+#    error('No AWS Credentials Found. See Readme for instructions on setting up AWS credentials.')
+#except ClientError as e:
+#    print(e.response)
+
+
+
 if go_args.command in commands:
     commands[go_args.command]()
 else:
