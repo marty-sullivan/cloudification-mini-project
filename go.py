@@ -71,10 +71,11 @@ def create():
     subnet = vpc.create_subnet(CidrBlock='10.0.0.0/24')
     subnet.create_tags(Tags=[{ 'Key': 'Name', 'Value': ses['prefix'] + 'subnet' }])
 
-    route = vpc.create_route_table()
-    route.create_tags(Tags=[{ 'Key': 'Name', 'Value': ses['prefix'] + 'route' }])
-    route.create_route(DestinationCidrBlock='0.0.0.0/0', GatewayId=gateway.internet_gateway_id)
-    route.associate_with_subnet(SubnetId=subnet.subnet_id)
+    routes = vpc.route_tables.all()
+    for route in routes:
+        route.create_tags(Tags=[{ 'Key': 'Name', 'Value': ses['prefix'] + 'route' }])
+        route.create_route(DestinationCidrBlock='0.0.0.0/0', GatewayId=gateway.internet_gateway_id)
+        route.associate_with_subnet(SubnetId=subnet.subnet_id)
 
     sec_grp = vpc.create_security_group(GroupName=ses['prefix'] + 'sg', Description=ses['prefix'] + 'sg')
     sec_grp.create_tags(Tags=[{ 'Key': 'Name', 'Value': ses['prefix'] + 'sg' }])
@@ -87,23 +88,28 @@ def create():
 	NetworkInterfaces=[{ 'DeviceIndex': 0, 'SubnetId': subnet.subnet_id, 'Groups': [sec_grp.group_id], 'AssociatePublicIpAddress': True }])
     for instance in instances:
         instance.create_tags(Tags=[{ 'Key': 'Name', 'Value': ses['prefix'] + 'instance' }])
+        instance.wait_until_running()
 
-    #ec2.create_security_group(GroupName=ses['prefix'] + 'sg'
-
+    #eip = ec2.meta.client.allocate_address(Domain='vpc')
+    #vpc_address = ec2.VpcAddress(
 
 def destroy():
     ses = getSession()
     ec2 = ses['session'].resource('ec2')
+    
+    rmtree(ses['localdir'])
     key_pairs = ec2.key_pairs.filter(KeyNames=[ses['prefix'] + 'keypair'])
-    vpcs = ec2.vpcs.filter(Filters=[{ 'Name': 'tag:Name', 'Values': [ses['prefix'] + 'vpc'] }])
     for k in key_pairs:
         k.delete()
+
+    vpcs = ec2.vpcs.filter(Filters=[{ 'Name': 'tag:Name', 'Values': [ses['prefix'] + 'vpc'] }])
     for vpc in vpcs:
+        instances = vpc.instances.all()
         sec_grps = vpc.security_groups.all()
         subnets = vpc.subnets.all()
-        instances = vpc.instances.all()
-        routes = vpc.route_tables.all()
         gateways = vpc.internet_gateways.all()
+        routes = vpc.route_tables.all()
+
         for instance in instances:
             instance.terminate()
             instance.wait_until_terminated()
@@ -111,14 +117,15 @@ def destroy():
             if sec.group_name != 'default': sec.delete()
         for subnet in subnets:
             subnet.delete()
-        for route in routes:
-            route.delete()
         for gateway in gateways:
             vpc.detach_internet_gateway(InternetGatewayId=gateway.internet_gateway_id)
             gateway.delete()
+        for route in routes:
+            assoc = route.associations.all()
+            for a in assoc:
+                if not a.main: a.delete()
         
         vpc.delete()
-    rmtree(ses['localdir'])
     
 
 def run():
