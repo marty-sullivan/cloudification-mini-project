@@ -2,9 +2,11 @@
 
 # Standard Imports
 from __future__ import print_function
-from os import makedirs, path
+from os import chmod, makedirs, path
 from shutil import rmtree
 from sys import exit, stderr
+from time import sleep
+from urllib2 import urlopen
 
 # Constants
 
@@ -56,42 +58,66 @@ def getSession():
 def create():
     ses = getSession()
     ec2 = ses['session'].resource('ec2')
-    #for i in ec2.instances.all():
-    #    print(i)
+
     key_pair = ec2.create_key_pair(KeyName=ses['prefix'] + 'keypair')
     with open(ses['localdir'] + key_pair.key_name + '.pem', 'w') as pem:
         pem.write(key_pair.key_material)
+        chmod(ses['localdir'] + key_pair.key_name + '.pem', 0600)
 
+    print('Creating VPC...')
     vpc = ec2.create_vpc(CidrBlock='10.0.0.0/16')
     vpc.create_tags(Tags=[{ 'Key': 'Name', 'Value': ses['prefix'] + 'vpc' }])
 
+    print('Creating Internet Gateway...')
     gateway = ec2.create_internet_gateway()
     vpc.attach_internet_gateway(InternetGatewayId=gateway.internet_gateway_id)
 
+    print('Creating Subnet 10.0.0.0/24')
     subnet = vpc.create_subnet(CidrBlock='10.0.0.0/24')
     subnet.create_tags(Tags=[{ 'Key': 'Name', 'Value': ses['prefix'] + 'subnet' }])
 
+    print('Setting up Routing Table...')
     routes = vpc.route_tables.all()
     for route in routes:
         route.create_tags(Tags=[{ 'Key': 'Name', 'Value': ses['prefix'] + 'route' }])
         route.create_route(DestinationCidrBlock='0.0.0.0/0', GatewayId=gateway.internet_gateway_id)
         route.associate_with_subnet(SubnetId=subnet.subnet_id)
 
+    print('Creating Security Group (open ports 22, 80, 443)...')
     sec_grp = vpc.create_security_group(GroupName=ses['prefix'] + 'sg', Description=ses['prefix'] + 'sg')
     sec_grp.create_tags(Tags=[{ 'Key': 'Name', 'Value': ses['prefix'] + 'sg' }])
     sec_grp.authorize_ingress(IpProtocol='tcp', FromPort=22, ToPort=22, CidrIp='0.0.0.0/0')
     sec_grp.authorize_ingress(IpProtocol='tcp', FromPort=80, ToPort=80, CidrIp='0.0.0.0/0')
     sec_grp.authorize_ingress(IpProtocol='tcp', FromPort=443, ToPort=443, CidrIp='0.0.0.0/0')
     
+    print('Creating Instance...')
     instances = ec2.create_instances(ImageId=DEFAULT_AMI, MinCount=1, MaxCount=1, \
 	KeyName=key_pair.key_name, UserData=ses['user-data'], InstanceType='t2.micro', \
 	NetworkInterfaces=[{ 'DeviceIndex': 0, 'SubnetId': subnet.subnet_id, 'Groups': [sec_grp.group_id], 'AssociatePublicIpAddress': True }])
+    
+    print('Allocating Elastic IP...')
+    eip = ec2.meta.client.allocate_address(Domain='vpc')
+    vpc_address = ec2.VpcAddress(eip['AllocationId'])
+
+    print('Waiting for Instance to Start...')
     for instance in instances:
         instance.create_tags(Tags=[{ 'Key': 'Name', 'Value': ses['prefix'] + 'instance' }])
         instance.wait_until_running()
+        vpc_address.associate(InstanceId=instance.instance_id)
 
-    #eip = ec2.meta.client.allocate_address(Domain='vpc')
-    #vpc_address = ec2.VpcAddress(
+    print('Waiting for Web Server to Start...')
+    url = 'http://{0}/index.html'.format(eip['PublicIp'])
+    while 1:
+        try:
+            urlopen(url, timeout=15)
+        except:
+            print('Still Waiting...')
+            sleep(15)
+        else:
+            break
+    
+    print('Done! IP of website: ' + eip['PublicIp'])
+
 
 def destroy():
     ses = getSession()
@@ -111,6 +137,10 @@ def destroy():
         routes = vpc.route_tables.all()
 
         for instance in instances:
+            addresses = instance.vpc_addresses.all()
+            for address in addresses:
+                ec2.meta.client.disassociate_address(AssociationId=address.association_id)
+                address.release()
             instance.terminate()
             instance.wait_until_terminated()
         for sec in sec_grps:
