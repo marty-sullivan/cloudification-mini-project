@@ -37,11 +37,13 @@ except ImportError:
 
 # Parse Args
 parser = ArgumentParser(description="Marty's Cloudification Mini Project")
-parser.add_argument("command", type=str, choices=['create', 'destroy', 'run', 'stop', 'test'], help="Automated function to use.")
+parser.add_argument("command", type=str, choices=['create', 'destroy', 'test'], help="Automated function to use.")
 parser.add_argument("-L", "--label", type=str, default='default', help="The label to identify the instance of mini-project to create or interact with. Default label is 'default'")
 
 global go_args
 go_args = parser.parse_args()
+
+# General Functions
 
 def getSession():
     ses = { }
@@ -54,11 +56,54 @@ def getSession():
         ses['user-data'] = ud.read()
     return ses
 
+def getAllResources(ses):
+    resources = { 'resourceCount': 0 }
+    ec2 = ses['session'].resource('ec2')
+
+    resources['vpcs'] = ec2.vpcs.filter(Filters=[{ 'Name': 'tag:Name', 'Values': [ses['prefix'] + 'vpc'] }])
+    resources['resourceCount'] += len(list(resources['vpcs']))
+    
+    resources['key_pairs'] = ec2.key_pairs.filter(Filters=[{ 'Name': 'key-name', 'Values': [ses['prefix'] + 'keypair'] }])
+    resources['resourceCount'] += len(list(resources['key_pairs']))
+
+    resources['gateways'] = ec2.internet_gateways.filter(Filters=[{ 'Name': 'tag:Name', 'Values': [ses['prefix'] + 'gateway'] }])
+    resources['resourceCount'] += len(list(resources['gateways']))
+
+    resources['subnets'] = ec2.subnets.filter(Filters=[{ 'Name': 'tag:Name', 'Values': [ses['prefix'] + 'subnet'] }])
+    resources['resourceCount'] += len(list(resources['subnets']))
+
+    resources['routes'] = ec2.route_tables.filter(Filters=[{ 'Name': 'tag:Name', 'Values': [ses['prefix'] + 'route'] }])
+    resources['resourceCount'] += len(list(resources['routes']))
+
+    resources['groups'] = ec2.security_groups.filter(Filters=[{ 'Name': 'tag:Name', 'Values': [ses['prefix'] + 'sg'] }])
+    resources['resourceCount'] += len(list(resources['groups']))
+
+    resources['instances'] = ec2.instances.filter(Filters=[{ 'Name': 'tag:Name', 'Values': [ses['prefix'] + 'instance'] }])
+    resources['resourceCount'] += len(list(resources['instances']))
+
+    resources['addresses'] = []
+    for instance in resources['instances']:
+        if instance.state['Name'] == 'terminated':
+            resources['resourceCount'] -= 1
+        addresses = instance.vpc_addresses.all()
+        for address in addresses:
+            resources['addresses'].append(address)
+        resources['resourceCount'] += len(resources['addresses'])
+    
+    return resources
+
 # Command Functions
 def create():
     ses = getSession()
     ec2 = ses['session'].resource('ec2')
 
+    print('Checking for existing resources for label: ' + go_args.label)
+    resources = getAllResources(ses)
+    if resources['resourceCount'] > 0:
+        error('\nThere are existing resources for label: {0}. Either run `./go.py destroy -L {0}` or provide a different label.'.format(go_args.label))
+        exit(1)
+
+    print('Creating Key Pair')
     key_pair = ec2.create_key_pair(KeyName=ses['prefix'] + 'keypair')
     with open(ses['localdir'] + key_pair.key_name + '.pem', 'w') as pem:
         pem.write(key_pair.key_material)
@@ -70,6 +115,7 @@ def create():
 
     print('Creating Internet Gateway...')
     gateway = ec2.create_internet_gateway()
+    gateway.create_tags(Tags=[{ 'Key': 'Name', 'Value': ses['prefix'] + 'gateway' }])
     vpc.attach_internet_gateway(InternetGatewayId=gateway.internet_gateway_id)
 
     print('Creating Subnet 10.0.0.0/24')
@@ -116,58 +162,92 @@ def create():
         else:
             break
     
-    print('Done! IP of website: ' + eip['PublicIp'])
+    print('\n*** DONE *** \nIP of website: ' + eip['PublicIp'])
 
 
 def destroy():
     ses = getSession()
     ec2 = ses['session'].resource('ec2')
+
+    resources = getAllResources(ses)
+    if resources['resourceCount'] < 1:
+        error('There are no EC2 resources for the label: ' + go_args.label)
+        exit(1)
+
+    ids = []
+    for key in resources:
+        if key == 'resourceCount': 
+            continue
+        elif key == 'addresses':
+            for address in resources[key]:
+                ids.append(address.allocation_id)
+        elif key == 'key_pairs':
+            for key_pair in resources[key]:
+                ids.append(key_pair.name)
+        elif key == 'instances':
+            for instance in resources[key]:
+                if instance.state['Name'] != 'terminated':
+                    ids.append(instance.id)
+        else:
+            for i in resources[key]:
+                ids.append(i.id)
+
+    print('\n*** The following resource ID\'s will be DESTROYED. Verify these are correct and type DESTROY to continue or anything else to cancel. ***\n')
+    for i in ids:
+        print(i)
+    print('')
+    response = raw_input('--> ')
+    if response != 'DESTROY':
+        exit(0)
+
+    print('\nReleasing Elastic IP...')
+    for address in resources['addresses']:
+        address.association.delete()
+        address.release()
     
-    rmtree(ses['localdir'])
-    key_pairs = ec2.key_pairs.filter(KeyNames=[ses['prefix'] + 'keypair'])
-    for k in key_pairs:
-        k.delete()
-
-    vpcs = ec2.vpcs.filter(Filters=[{ 'Name': 'tag:Name', 'Values': [ses['prefix'] + 'vpc'] }])
-    for vpc in vpcs:
-        instances = vpc.instances.all()
-        sec_grps = vpc.security_groups.all()
-        subnets = vpc.subnets.all()
-        gateways = vpc.internet_gateways.all()
-        routes = vpc.route_tables.all()
-
-        for instance in instances:
-            addresses = instance.vpc_addresses.all()
-            for address in addresses:
-                ec2.meta.client.disassociate_address(AssociationId=address.association_id)
-                address.release()
+    print('Terminating Instance...')
+    for instance in resources['instances']:
+        if instance.state['Name'] != 'terminated':
             instance.terminate()
+            print('Waiting for instance to terminate...')
             instance.wait_until_terminated()
-        for sec in sec_grps:
-            if sec.group_name != 'default': sec.delete()
-        for subnet in subnets:
-            subnet.delete()
-        for gateway in gateways:
+
+    print('Deleting Security Group...')
+    for group in resources['groups']:
+        group.delete()
+
+    print('Deleting Subnet...')
+    for subnet in resources['subnets']:
+        subnet.delete()
+
+    print('Deleting Route Table...')
+    for route in resources['routes']:
+        assoc = route.associations.all()
+        for a in assoc:
+            if not a.main: a.delete()
+
+    for vpc in resources['vpcs']:
+        print('Deleting Internet Gateway...')
+        for gateway in resources['gateways']:
             vpc.detach_internet_gateway(InternetGatewayId=gateway.internet_gateway_id)
             gateway.delete()
-        for route in routes:
-            assoc = route.associations.all()
-            for a in assoc:
-                if not a.main: a.delete()
         
+        print('Deleting VPC...')
         vpc.delete()
-    
 
-def run():
-    print('run')
+    print('Deleting Key Pair...')
+    for key_pair in resources['key_pairs']:
+        key_pair.delete()
+        rmtree(ses['localdir'])
 
-def stop():
-    print('stop')
+    print('\n*** DONE ***')
 
 def test():
-    print('test')
+    ses = getSession()
+    r = getAllResources(ses)
+    print(r['resourceCount'])
 
-commands = { 'create': create, 'destroy': destroy, 'run': run, 'stop': stop, 'test': test }
+commands = { 'create': create, 'destroy': destroy, 'test': test }
 
 # Entry
 
