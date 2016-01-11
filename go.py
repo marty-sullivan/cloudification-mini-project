@@ -100,7 +100,7 @@ def create():
     print('Checking for existing resources for label: ' + go_args.label)
     resources = getAllResources(ses)
     if resources['resourceCount'] > 0:
-        error('\nThere are existing resources for label: {0}. Either run `./go.py destroy -L {0}` or provide a different label.'.format(go_args.label))
+        error('There are existing resources for label: {0}. Either run `./go.py destroy -L {0}` or provide a different label.'.format(go_args.label))
         exit(1)
 
     print('Creating Key Pair')
@@ -244,8 +244,31 @@ def destroy():
 
 def test():
     ses = getSession()
-    r = getAllResources(ses)
-    print(r['resourceCount'])
+
+    print('Getting Resources for label: ' + go_args.label)
+    resources = getAllResources(ses)
+    if resources['resourceCount'] < 1:
+        error('There are no resources for label: {0}. Perhaps you want to `./go create -L {0}` to generate the env?'.format(go_args.label))
+        exit(1)
+    if resources['resourceCount'] < 8:
+        warning('There seems to be one or more components missing from the cloud infrastructure...')
+
+    for address in resources['addresses']:
+        url = 'http://{0}/index.html'.format(address.public_ip)
+        try:
+            response = urlopen(url, timeout=10)
+            if response.getcode() != 200:
+                error('HTTP Status: {0}'.format(response.getcode()))
+            content = response.read()
+            if not 'Cloudification Rocks!' in content:
+                error('Page content is not as expected.')
+            else:
+                print('Page content is as expected.')
+        except:
+            error('The website cannot be reached.')
+        finally:
+            print('*** TEST COMPLETE ***')
+
 
 commands = { 'create': create, 'destroy': destroy, 'test': test }
 
