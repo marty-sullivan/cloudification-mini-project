@@ -255,6 +255,7 @@ def test():
 
     for address in resources['addresses']:
         url = 'http://{0}/index.html'.format(address.public_ip)
+        print(url)
         try:
             response = urlopen(url, timeout=10)
             if response.getcode() != 200:
